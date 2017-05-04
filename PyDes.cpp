@@ -343,10 +343,7 @@ static bool isInit = false;
 static uint32_t SK[32], ESK[32];
 static uint8_t KeyArr[8] = { 0x01,0x23,0x45,0x67,0x89,0xab,0xcd,0xef };
 
-//
-//初始化Des模块，构造16轮子密钥
-//
-void des_init()
+static void des_init()
 {
 	assert(!isInit);
 	isInit = true;
@@ -358,75 +355,16 @@ void des_init()
 	}
 }
 
-//
-//加密一个64位
-//
-void des_encrypt_uint64(uint64_t* c, const uint64_t* p)
+static void des_encrypt_uint64(uint64_t* c, const uint64_t* p)
 {
 	assert(isInit);
 	des_crypt(SK, (const uint8_t*)p, (uint8_t*)c);
 }
 
-//
-//解密一个64位
-//
-void des_decrypt_uint64(uint64_t* p, const uint64_t* c)
+static void des_decrypt_uint64(uint64_t* p, const uint64_t* c)
 {
 	assert(isInit);
 	des_crypt(ESK, (const uint8_t*)c, (uint8_t*)p);
-}
-
-
-//
-//加密一串字节
-//
-void des_encrypt_bytes(uint8_t* c, const uint8_t* p, int sz)
-{
-	assert(isInit);
-	assert(c && p);
-	assert(sz > 0);
-	int i;
-	for (i = 0; i < sz - 7; i += 8)
-		des_encrypt_uint64((uint64_t*)(c + i), (uint64_t*)(p + i));
-
-	int bytes = sz - i;
-	uint8_t tail[8];
-	for (int j = 0; j < 8; j++)
-	{
-		if (j < bytes)
-			tail[j] = p[i + j];
-		else if (j == bytes)
-			tail[j] = 0x80;
-		else
-			tail[j] = 0;
-	}
-	des_encrypt_uint64((uint64_t*)(c + i), (uint64_t*)tail);
-}
-
-//
-//解密一串字节
-//
-void des_decrypt_bytes(uint8_t* p, const uint8_t* c, int sz)
-{
-	assert(isInit);
-	assert(c && p);
-	assert(sz > 0);
-	int i;
-	for (i = 0; i < sz; i += 8)
-		des_decrypt_uint64((uint64_t*)(p + i), (uint64_t*)(c + i));
-
-	int padding = 1;
-	for (i = sz - 1; i >= sz - 8; i--)
-	{
-		if (p[i] == 0)
-			padding++;
-		else if (p[i] == 0x80)
-			break;
-		else
-			assert(false); // Invalid des crypt text
-	}
-	if (padding > 8)
-		assert(false); // Invalid des crypt text
 }
 
 PyObject* PyDes_Init(PyObject* self, PyObject* args)
@@ -435,42 +373,82 @@ PyObject* PyDes_Init(PyObject* self, PyObject* args)
 	Py_RETURN_NONE;
 }
 
-//4K的静态缓冲区
+/* 4K的静态缓冲区 */
 #define BUFF_SIZE 4096
 static uint8_t buffer[BUFF_SIZE];
 
 PyObject* PyDes_EncryptBytes(PyObject* self, PyObject* args)
 {
-	PyObject* data;
-	const char* text;
-	if (!PyArg_ParseTuple(args, "s#", &text))
+	if (!isInit)
+	{
+		PyErr_SetString(PyExc_RuntimeError, "need init des module first");
 		return NULL;
+	}
 
-	size_t textsz = strlen(text);
-	size_t blocksz = (textsz + 8) & ~7;
+	const char* text;
+	Py_ssize_t textsz = 0;
+	if (!PyArg_ParseTuple(args, "s#", &text, &textsz))
+	{
+		return NULL;
+	}
+
+	if (text == NULL || textsz == 0)
+	{
+		PyErr_SetString(PyExc_RuntimeError, "parse args error");
+		return NULL;
+	}
+
+	int blocksz = (textsz + 8) & ~7;
 	if (blocksz > BUFF_SIZE)
 	{
 		PyErr_SetString(PyExc_RuntimeError, "text too big");
 		return NULL;
 	}
 
-	des_encrypt_bytes(buffer, (const uint8_t*)text, textsz);
+	int i;
+	for (i = 0; i < textsz - 7; i += 8)
+		des_encrypt_uint64((uint64_t*)(buffer + i), (uint64_t*)(text + i));
 
-	data = PyString_FromFormat("%u", buffer, blocksz);
+	int bytes = textsz - i;
+	uint8_t tail[8];
+	for (int j = 0; j < 8; j++)
+	{
+		if (j < bytes)
+			tail[j] = text[i + j];
+		else if (j == bytes)
+			tail[j] = 0x80;
+		else
+			tail[j] = 0;
+	}
+	des_encrypt_uint64((uint64_t*)(buffer + i), (uint64_t*)tail);
+
+	PyObject* data = PyString_FromStringAndSize((const char*)buffer, (Py_ssize_t)blocksz);
 	Py_INCREF(data);
-
 	return data;
 }
 
 PyObject* PyDes_DecryptBytes(PyObject* self, PyObject* args)
 {
-	PyObject* data;
-	const char* text;
-	if (!PyArg_ParseTuple(args, "s#", &text))
+	if (!isInit)
+	{
+		PyErr_SetString(PyExc_RuntimeError, "need init des module first");
 		return NULL;
+	}
 
-	size_t textsz = strlen(text);
-	if (textsz & 7)
+	const char* text;
+	Py_ssize_t textsz = 0;
+	if (!PyArg_ParseTuple(args, "s#", &text, &textsz))
+	{
+		return NULL;
+	}
+
+	if (text == NULL || textsz == 0)
+	{
+		PyErr_SetString(PyExc_RuntimeError, "parse args error");
+		return NULL;
+	}
+
+	if (textsz & 0x07)
 	{
 		PyErr_SetString(PyExc_RuntimeError, "wrong text size");
 		return NULL;
@@ -482,12 +460,30 @@ PyObject* PyDes_DecryptBytes(PyObject* self, PyObject* args)
 		return NULL;
 	}
 
-	des_decrypt_bytes(buffer, (const uint8_t*)text, textsz);
+	int i;
+	for (i = 0; i < textsz; i += 8)
+		des_decrypt_uint64((uint64_t*)(buffer + i), (uint64_t*)(text + i));
 
-	data = PyString_FromFormat("%u", buffer, textsz);
+	int padding = 1;
+	for (i = textsz - 1; i >= textsz - 8; i--)
+	{
+		if (buffer[i] == 0)
+			padding++;
+		else if (buffer[i] == 0x80)
+			break;
+		else
+			goto WRG_TXT;
+	}
+	if (padding > 8)
+		goto WRG_TXT;
+
+	PyObject* data = PyString_FromStringAndSize((const char*)buffer, (Py_ssize_t)(textsz - padding));
 	Py_INCREF(data);
-
 	return data;
+
+WRG_TXT:
+	PyErr_SetString(PyExc_RuntimeError, "invalid des crypt text");
+	return NULL;
 }
 
 static PyMethodDef PyDes_Methods[] =
